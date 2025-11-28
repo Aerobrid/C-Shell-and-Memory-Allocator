@@ -10,7 +10,7 @@
 * ```clearhistory``` command: Clears the stored command history for the current session.
 * ```whoami``` command: Prints username of the current user.
 * ```mkdir``` command: Creates a directory with specified name and default permissions (rwx for owner).
-* ```rmdir``` command: Removes an empty directory with the specified name.
+* ```rmdir``` command: Removes an empty directory with a specified name.
 * ```delete``` command: Deletes a specified file after user confirmation **(USE WITH CAUTION)**.
 * ```rdelete``` command: Recursively deletes a directory and all its contents after user confirmation **(USE WITH CAUTION)**.
 * ```touch``` command: Creates an empty file or updates the timestamp of an existing file (rw for owner).
