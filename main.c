@@ -1,9 +1,18 @@
 #include <sys/wait.h>
-#include <sys/types.h>
+#include <dirent.h>
 #include <unistd.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <fcntl.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
+
+// history buffer
+#define HISTORY_SIZE 100
+char *history[HISTORY_SIZE];
+int history_count = 0;
 
 /*
   Function Declarations for builtin shell commands:
@@ -12,15 +21,40 @@
 int lsh_cd(char **args);
 int lsh_help(char **args);
 int lsh_exit(char **args);
+int lsh_pwd(char **args);
+int lsh_echo(char **args);
+int lsh_clear(char ** args);
+int lsh_history(char **args);
+int lsh_whoami(char **args);
+int lsh_mkdir(char **args);
+int lsh_rmdir(char **args);
+int lsh_touch(char **args);
+int lsh_cat(char **args);
+int lsh_clearhistory(char **args);
+int lsh_ls(char **args);
+int lsh_delete(char **args);
+int lsh_mydate(char **args);
+int lsh_rdelete(char **args);
 
-/*
-  List of builtin commands, followed by their corresponding functions.
- */
-// array of strings containing the built-in shell commands
+// array of strings containing built-in shell commands
 char *builtin_str[] = {
     "cd",
     "help",
-    "exit"
+    "exit",
+    "pwd",
+    "echo",
+    "clear",
+    "history",
+    "whoami",
+    "mkdir",
+    "rmdir",
+    "touch",
+    "cat",
+    "clearhistory",
+    "ls",
+    "delete",
+    "mydate",
+    "rdelete"
 };
 
 // an array of function pointers, each one mapping to a function that uses a built-in shell command
@@ -29,7 +63,21 @@ char *builtin_str[] = {
 int (*builtin_func[]) (char **) = {
     &lsh_cd,
     &lsh_help,
-    &lsh_exit
+    &lsh_exit,
+    &lsh_pwd,
+    &lsh_echo,
+    &lsh_clear,
+    &lsh_history,
+    &lsh_whoami,
+    &lsh_mkdir,
+    &lsh_rmdir,
+    &lsh_touch,
+    &lsh_cat,
+    &lsh_clearhistory,
+    &lsh_ls, 
+    &lsh_delete, 
+    &lsh_mydate,
+    &lsh_rdelete
 };
 
 // returns # of built-in commands
@@ -37,9 +85,6 @@ int lsh_num_builtins() {
     return sizeof(builtin_str) / sizeof(char *);
 }
 
-/*
-  Builtin function implementations.
-*/
 // for native cd command
 int lsh_cd(char **args)
 {
@@ -61,21 +106,269 @@ int lsh_cd(char **args)
 int lsh_help(char **args)
     {
     int i;
-    printf("Stephen Brennan's LSH\n");
     printf("Type program names and arguments, and hit enter.\n");
-    printf("The following are built in:\n");
+    printf("The following are included:\n");
 
     // lists all of the built-in shell commands
     for (i = 0; i < lsh_num_builtins(); i++) {
         printf("  %s\n", builtin_str[i]);
     }
 
-    // asks user to refer to the external man command
     printf("Use the man command for information on other programs.\n");
 
-    // tell the shell to keep on going 
     return 1;
 }
+
+// return working directory using getcwd()
+int lsh_pwd(char **args) {
+    char cwd[1024];
+    if (getcwd(cwd, sizeof(cwd)) != NULL)
+        printf("%s\n", cwd);
+    else
+        perror("lsh");
+
+    return 1;
+}
+
+// echo command
+int lsh_echo(char **args) {
+    for (int i = 1; args[i] != NULL; i++) {
+        printf("%s ", args[i]);
+    }
+    printf("\n");
+
+    return 1;
+}
+
+// prints ANSI escape code
+int lsh_clear(char **args) {
+    printf("\033[H\033[J");
+    fflush(stdout);
+    return 1;
+}
+
+// print out command history
+int lsh_history(char **args) {
+    for (int i = 0; i < history_count; i++) {
+        printf("%d  %s", i + 1, history[i]);
+    }
+
+    return 1;
+}
+
+// whoami command using getlogin()
+int lsh_whoami(char **args) {
+    char *username = getlogin();
+    if (!username) username = getenv("USER");
+    if (username)
+        printf("%s\n", username);
+    else
+        fprintf(stderr, "whoami: cannot determine user\n");
+    return 1;
+}
+
+// create directory using mkdir()
+int lsh_mkdir(char **args) {
+    if (args[1] == NULL) {
+        fprintf(stderr, "mkdir: missing operand\n");
+        return 1;
+    }
+    // 0755 → owner: 7 | group: 5 | others: 5
+    // 7 = 4 (read) + 2 (write) + 1 (execute) (cd into dir needs execute permission)
+    // 5 = 4 + 1 = read + execute
+    if (mkdir(args[1], 0755) != 0)
+        perror("mkdir");
+
+    return 1;
+}
+
+// create files using touch 
+int lsh_touch(char **args) {
+    if (args[1] == NULL) {
+        fprintf(stderr, "touch: missing file operand\n");
+        return 1;
+    }
+
+    // open() needs filename, file action, file permission
+    int fd = open(args[1], O_WRONLY | O_CREAT, 0644);
+    if (fd == -1) {
+        perror("touch");
+        return 1;
+    }
+
+    // update timestamp (like real touch)
+    futimens(fd, NULL);
+
+    close(fd);
+    return 1;
+}
+
+// remove directory using rmdir()
+int lsh_rmdir(char **args) {
+    if (args[1] == NULL) {
+        fprintf(stderr, "rmdir: missing operand\n");
+        return 1;
+    }
+    if (rmdir(args[1]) != 0)
+        perror("rmdir");
+
+    return 1;
+}
+
+// cat command
+int lsh_cat(char **args) {
+    if (args[1] == NULL) {
+        fprintf(stderr, "cat: missing file\n");
+        return 1;
+    }
+
+    // open file
+    FILE *fp = fopen(args[1], "r");
+    // if file DNE
+    if (!fp) {
+        fprintf(stderr, "cat: %s: ", args[1]);
+        perror("No such file or directory");
+        return 1;
+    }   
+
+    // read file -> write char to standard output stream (maps to int)
+    int ch;
+    while ((ch = fgetc(fp)) != EOF) {
+        putchar(ch);
+    }
+    // close file
+    fclose(fp);
+
+    return 1;
+}
+
+// for clearing history 
+int lsh_clearhistory(char **args) {
+    for (int i = 0; i < history_count; i++) {
+        free(history[i]);     // free each command string
+        history[i] = NULL;    // just to be safe
+    }
+    history_count = 0;        // reset counter
+    printf("History cleared.\n");
+    return 1;
+}
+
+// to list files in current dir
+int lsh_ls(char **args) {
+    DIR *d = opendir(".");
+    if (!d) {
+        perror("listfiles");
+        return 1;
+    }
+
+    struct dirent *entry;
+    while ((entry = readdir(d)) != NULL) {
+        printf("%s  ", entry->d_name);
+    }
+    printf("\n");
+    closedir(d);
+    return 1;
+}
+
+// delete command with user choice verification
+int lsh_delete(char **args) {
+    if (args[1] == NULL) {
+        fprintf(stderr, "delete: missing file operand\n");
+        return 1;
+    }
+
+    char choice;
+    printf("Are you sure you want to delete '%s'? (y/n): ", args[1]);
+    scanf(" %c", &choice);
+    while (getchar() != '\n'); // clear stdin
+
+    if (choice == 'y' || choice == 'Y') {
+        if (remove(args[1]) != 0) {
+            perror("delete");
+        } else {
+            printf("'%s' deleted.\n", args[1]);
+        }
+    } else {
+        printf("Delete cancelled.\n");
+    }
+
+    return 1;
+}
+
+// command telling date
+int lsh_mydate(char **args) {
+    time_t t = time(NULL);
+    struct tm tm = *localtime(&t);
+    printf("Current date/time: %04d-%02d-%02d %02d:%02d:%02d\n",
+           tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+           tm.tm_hour, tm.tm_min, tm.tm_sec);
+    return 1;
+}
+
+// Recursive helper function for rdelete
+int rdelete_recursive(const char *path) {
+    struct stat st;
+    if (stat(path, &st) != 0) {       // Check if path exists
+        perror("rdelete");
+        return -1;
+    }
+
+    // If directory
+    if (S_ISDIR(st.st_mode)) {  
+        // open it      
+        DIR *d = opendir(path);
+        if (!d) return -1;
+
+        struct dirent *entry;
+        while ((entry = readdir(d)) != NULL) {
+            if (strcmp(entry->d_name, ".") && strcmp(entry->d_name, "..")) {
+                char newpath[1024];
+                snprintf(newpath, sizeof(newpath), "%s/%s", path, entry->d_name);
+                rdelete_recursive(newpath);  // Recursive call for each entry
+            }
+        }
+        // close it
+        closedir(d);
+
+        // Remove directory itself
+        if (rmdir(path) != 0) {        
+            perror("rdelete");
+            return -1;
+        }
+    // If regular file
+    } else {                            
+        if (remove(path) != 0) {
+            perror("rdelete");
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
+// lsh_rdelete command
+int lsh_rdelete(char **args) {
+    if (args[1] == NULL) {
+        fprintf(stderr, "rdelete: missing directory operand\n");
+        return 1;
+    }
+
+    char choice;
+    printf("Are you sure you want to recursively delete '%s'? (y/n): ", args[1]);
+    scanf(" %c", &choice);
+    while (getchar() != '\n'); // clear stdin
+
+    if (choice == 'y' || choice == 'Y') {
+        if (rdelete_recursive(args[1]) == 0) {
+            printf("'%s' deleted recursively.\n", args[1]);
+        }
+    } else {
+        printf("Recursive delete cancelled.\n");
+    }
+
+    return 1;
+}
+
 
 // if the native exit command is executed, exit the shell program
 int lsh_exit(char **args)
@@ -268,8 +561,10 @@ void lsh_loop(void)
     do {
         printf("> ");                                   // 1. print prompt
         line = lsh_read_line();                         // 2. read the line from user (we call a function for it)
-        args = lsh_split_line(line);                    // 3. split the line into args (we call a function for it)
-        status = lsh_execute(args);                     // 4. Execute those args, also determines whether or not shell should keep on running (we call a function for it)
+        if (history_count < HISTORY_SIZE)               // 3. if history buffer not full add command into it
+            history[history_count++] = strdup(line);
+        args = lsh_split_line(line);                    // 4. split the line into args (we call a function for it)
+        status = lsh_execute(args);                     // 5. Execute those args, also determines whether or not shell should keep on running (we call a function for it)
 
         // free pointers for line and arguments
         free(line);
@@ -278,7 +573,7 @@ void lsh_loop(void)
 }
 
 // argc = argument count [holds # of command line arguments passed to program, includes program name itself]
-// argv = argument vector [array of strings (or specifically char*  pointers) containing the command-line arguments passed into program]
+// argv = argument vector [array of strings (or specifically char* pointers) containing the command-line arguments passed into program]
 int main(int argc, char **argv)
 {
     // Load config files, if any.
@@ -287,6 +582,8 @@ int main(int argc, char **argv)
     lsh_loop();
 
     // Perform any shutdown/cleanup.
+    for (int i = 0; i < history_count; i++)
+        free(history[i]);
 
     // typically returns 0, indicates successful program termination
     return EXIT_SUCCESS;
