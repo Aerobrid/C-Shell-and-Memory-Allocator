@@ -29,7 +29,7 @@ This repository includes a shell written in C. It takes advantage of system call
 
 ## Memory Allocator
 
-This repository also includes a memory allocator written in C. It implements malloc(), free(), realloc(), and calloc() using the sbrk() call system from Unix/Linux OS. The main repository this allocator is based on is [here](https://github.com/arjun024/memalloc/tree/master.).
+This repository also includes a memory allocator written in C. It implements malloc(), free(), realloc(), and calloc() using the sbrk() call system from Unix/Linux OS. The main repository this allocator is based on is [here](https://github.com/arjun024/memalloc/tree/master).
 
 ## How to use
 
