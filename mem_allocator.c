@@ -1,8 +1,12 @@
 // simple memory allocator implementing malloc(), realloc(), calloc(), and free()
 #include <unistd.h>			// for sbrk() system call which manipulates brk pointer (used in Unix-like OS)
 #include <string.h>			// for using memset() in calloc() and memcpy() in realloc()
-#include <pthread.h>		// for locking mechanism preventing multiple thread access
-#include <stdio.h>			// Only added for the printf in debugging function
+#include <pthread.h>		// for mutex locks
+#include <limits.h>	
+#include <stdint.h>		
+#include <stdio.h>	
+
+#define MIN_SPLIT 32
 
 // to ensure 16-byte alignment for the memory blocks (an array of 16 chars a.k.a. 16 bytes since 1 char = 1 byte)
 // for performance gains, compatibility, and to avoid weird behavior for some architectures when working with different data types
@@ -20,15 +24,17 @@ union header {
 	ALIGN stub;
 };
 
-// is a type alias for the header union
 // using typedef so that: header_t = union header 
 typedef union header header_t;
+
+// header_t exists so we can declare prototype
+void split_block(header_t *h, size_t size);
 
 // points to first and last blocks of the linked list
 header_t *head = NULL, *tail = NULL;
 // a global mutex to prevent multiple threads from accessing the memory allocator (synchronize the access to it so that only 1 thread can execute at a time)
-// from pthread header, useful mutex documentation
-pthread_mutex_t global_malloc_lock;
+// from pthread header, useful mutex documentation (does not protect from outside sbrk() calls)
+pthread_mutex_t global_malloc_lock = PTHREAD_MUTEX_INITIALIZER;
 
 // traverses the linked list to find a memory block that is free and that can accomodate given size within the parameter
 // notice we are using header_t as a shortcut for union header
@@ -50,60 +56,65 @@ header_t *get_free_block(size_t size)
 // the free implementation that takes a void ptr (returned by other functions) to the memory block
 void free(void *block)
 {
-	header_t *header, *tmp;
-	// program break is ptr to the end of the process's data segment 
-	void *programbreak;
-	
-	// edge case: if block is null then just return
-	if (!block)
-		return;
-	pthread_mutex_lock(&global_malloc_lock);			// lock since we will be performing operations on linked list
-	header = (header_t*)block - 1;						// get the header of the block (by casting block to header_t, then subtracting it by 1 which moves ptr back by size of header_t, effectively pointing to header)
-	/* sbrk(0) gives the current program break address */
-	programbreak = sbrk(0);								
+    header_t *header, *tmp, *prev = NULL;
+    void *programbreak;
 
-	/*
-	   Check if the block to be freed is the last one in the
-	   linked list. If it is, then we could shrink the size of the
-	   heap and release memory to OS. Else, we will keep the block
-	   but mark it as free.
-	 */
-	// cast to char for proper pointer arithmetic (header size is in bytes, so we need to add the memory block in bytes (1 char = 1 byte))
-	// if the block's ending address in linked list is the current program break address, it means it is the last block in list so we can free it from OS
-	if ((char*)block + header->s.size == programbreak) {
-		// only 1 block in linked list
-		if (head == tail) {
-			head = tail = NULL;
-		} else {
-			// if not only block, find the tail and free it from the list
-			tmp = head;
-			while (tmp) {
-				if(tmp->s.next == tail) {
-					tmp->s.next = NULL;
-					tail = tmp;
-				}
-				tmp = tmp->s.next;
-			}
-		}
-		/*
-		   sbrk() with a negative argument decrements the program break.
-		   So memory is released by the program to OS.
-		*/
-		// removes memory allocated for block 
-		sbrk(0 - header->s.size - sizeof(header_t));
-		/* Note: This lock does not really assure thread
-		   safety, because sbrk() itself is not really
-		   thread safe. Suppose there occurs a foreign sbrk(N)
-		   after we find the program break and before we decrement
-		   it, then we end up realeasing the memory obtained by
-		   the foreign sbrk().
-		*/
-		pthread_mutex_unlock(&global_malloc_lock);		// unlock right before returning
-		return;
-	}
-	// after that or if block not at end of linked list, set marker so that block is free
-	header->s.is_free = 1;
-	pthread_mutex_unlock(&global_malloc_lock);			// unlock right before function ends
+    if (!block)
+        return;
+
+    pthread_mutex_lock(&global_malloc_lock);
+    header = (header_t*)block - 1;    // header is right before user pointer
+    programbreak = sbrk(0);
+
+    // compute end of this header+payload
+    char *block_end = (char*)header + sizeof(header_t) + header->s.size;
+
+    // if this block is at the top of the heap, release memory back to OS
+    if (block_end == programbreak) {
+        // single-block list
+        if (head == tail) {
+            head = tail = NULL;
+        } else {
+            // find previous (new tail)
+            tmp = head;
+            while (tmp && tmp->s.next != header) {
+                tmp = tmp->s.next;
+            }
+            if (tmp) {
+                tmp->s.next = NULL;
+                tail = tmp;
+            }
+        }
+        // release header + payload bytes
+        sbrk(-((intptr_t)sizeof(header_t) + (intptr_t)header->s.size));
+        pthread_mutex_unlock(&global_malloc_lock);
+        return;
+    }
+
+    // mark free
+    header->s.is_free = 1;
+
+    // coalesce with next if free
+    if (header->s.next && header->s.next->s.is_free) {
+        header->s.size += sizeof(header_t) + header->s.next->s.size;
+        header->s.next = header->s.next->s.next;
+        if (header->s.next == NULL) tail = header;
+    }
+
+    // coalesce with previous if previous is free
+    // find previous by traversal (O(n)) — acceptable for this simple allocator
+    tmp = head;
+    while (tmp && tmp->s.next && tmp->s.next != header) {
+        tmp = tmp->s.next;
+    }
+    if (tmp && tmp->s.next == header && tmp->s.is_free) {
+        // merge tmp (prev) and header
+        tmp->s.size += sizeof(header_t) + header->s.size;
+        tmp->s.next = header->s.next;
+        if (tmp->s.next == NULL) tail = tmp;
+    }
+
+    pthread_mutex_unlock(&global_malloc_lock);
 }
 
 // given size, returns void ptr to same size allocated memory in heap
@@ -124,12 +135,18 @@ void *malloc(size_t size)
 	header = get_free_block(size);
 	// remember that if header = NULL, we could not find a suitable block
 	if (header) {
+		split_block(header, size);
 		/* Woah, found a free block to accomodate requested memory. */
 		header->s.is_free = 0;
 		pthread_mutex_unlock(&global_malloc_lock);		// unlock after traversal
 		// return the memory block portion and not the header to the user (done by header + 1)
 		// also cast to void ptr since that is what malloc returns (can be casted further by the user)
 		return (void*)(header + 1);
+	}
+	// overflow check
+	if (size > SIZE_MAX - sizeof(header_t)) {
+		pthread_mutex_unlock(&global_malloc_lock);
+		return NULL;
 	}
 	// Otherwise, we need to get memory to fit in the requested block and header from OS using sbrk() 
 	// basically add a new block to end of list if any previous blocks are not suitable using sbrk(total size)
@@ -171,7 +188,7 @@ void *calloc(size_t num, size_t nsize)
 	// calculating total size for memblock
 	size = num * nsize;
 	/* check mul overflow */
-	if (nsize != size / num)
+	if (num != 0 && nsize > SIZE_MAX / num)
 		return NULL;
 	// do the job of malloc() first
 	block = malloc(size);
@@ -192,11 +209,11 @@ void *realloc(void *block, size_t size)
 	header_t *header;
 	// readjusted raw memory ptr 
 	void *ret;
-	// edge case: if either block is NULL or size is 0, defer to malloc() (would return NULL ptr ideally)
-	if (!block || !size)
-		return malloc(size);
-	// to get header portion of block (casts it so that it points to header_t type, then moves ptr back by the size of header_t to get header location)
-	header = (header_t*)block - 1;
+	// edge cases: if either block is NULL or size is 0, defer to malloc() (would return NULL ptr ideally)
+    if (!block) return malloc(size);
+    if (size == 0) { free(block); return NULL; }
+	// point to blocks header
+    header = (header_t*)block - 1;
 	// if current block is already large enough to fit requested size, then return same block ptr without any changes
 	if (header->s.size >= size)
 		return block;
@@ -211,6 +228,18 @@ void *realloc(void *block, size_t size)
 	}
 	// return resized ptr to memblock
 	return ret;
+}
+
+void split_block(header_t *h, size_t size) {
+    if (h->s.size >= size + sizeof(header_t) + MIN_SPLIT) {
+        header_t *newh = (header_t *)((char*)(h + 1) + size);
+        newh->s.size = h->s.size - size - sizeof(header_t);
+        newh->s.is_free = 1;
+        newh->s.next = h->s.next;
+        h->s.size = size;
+        h->s.next = newh;
+        if (tail == h) tail = newh;
+    }
 }
 
 // A debug function to print the entire link list
